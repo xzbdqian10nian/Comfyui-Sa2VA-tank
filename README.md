@@ -1,5 +1,7 @@
 # ComfyUI Sa2VA
 
+> **Fork of [adambarbato/ComfyUI-Sa2VA](https://github.com/adambarbato/ComfyUI-Sa2VA)** with enhanced features and optimizations.
+
 ## Overview
 A ComfyUI node implementation for [ByteDance's Sa2VA](https://github.com/bytedance/Sa2VA) (Segment Anything 2 Video Assistant) models, enabling advanced multimodal image and video understanding with precise segmentation capabilities.
 This repo only implements the image portion of the model.
