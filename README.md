@@ -4,6 +4,20 @@
 A ComfyUI node implementation for [ByteDance's Sa2VA](https://github.com/bytedance/Sa2VA) (Segment Anything 2 Video Assistant) models, enabling advanced multimodal image and video understanding with precise segmentation capabilities.
 This repo only implements the image portion of the model.
 
+## Key Enhancements
+
+This fork includes several important optimizations:
+
+- **Model Storage Optimization**: Models are stored in `ComfyUI/models/sa2va/` with clear folder structure (not blob cache), making it easy to manually download models from HuggingFace and place them directly in the corresponding folder. Each model has its own readable directory (e.g., `Sa2VA-Qwen3-VL-4B/`) with all files visible and accessible.
+
+- **Advanced Mask Processing**: Enhanced mask refinement pipeline with black/white point control, detail methods (VITMatte/FastMatte), and morphological operations (erode/dilate) for precise mask adjustment, matching the workflow style of GroundingDINO-based nodes.
+
+- **Dedicated Model Loader Node**: Separate `Sa2VA Loader` node allows preloading models once and sharing them across multiple segmentation nodes, perfect for multi-threaded workflows and batch processing. This eliminates redundant model loading and significantly improves efficiency in complex workflows.
+
+- **Improved Dimension Handling**: Robust mask dimension reduction logic handles various edge cases (1D-5D+ tensors) with intelligent dimension detection and error recovery.
+
+- **VRAM Management**: Optional VRAM cleanup after execution, configurable per node to balance memory usage and performance.
+
 ### What is Sa2VA?
 Sa2VA is a state-of-the-art multimodal large language model (MLLM) that combines SAM2 (Segment Anything Model 2) with VLLMs for grounded understanding of images and videos. It achieves comparable performance to SOTA MLLMs like Qwen2.5-VL and InternVL3 on question-answering benchmarks while adding advanced visual prompt understanding and dense object segmentation capabilities.
 
