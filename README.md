@@ -40,16 +40,16 @@ It can also segment more than one mask at a time, but the prompt needs to be pre
 ### Manual Installation
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/adambarbato/ComfyUI-Sa2VA.git
-cd ComfyUI-Sa2VA
+git clone https://github.com/xzbdqian10nian/Comfyui-Sa2VA-tank.git
+cd Comfyui-Sa2VA-tank
 python install.py
 ```
 
 ### Quick Install (Advanced Users)
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/adambarbato/ComfyUI-Sa2VA.git
-cd ComfyUI-Sa2VA
+git clone https://github.com/xzbdqian10nian/Comfyui-Sa2VA-tank.git
+cd Comfyui-Sa2VA-tank
 pip install -r requirements.txt
 ```
 
@@ -274,5 +274,5 @@ python test_sa2va.py
 - [Sa2VA Models on HuggingFace](https://huggingface.co/ByteDance)
 - [ComfyUI](https://github.com/comfyanonymous/ComfyUI)
 - Based on code from [ComfyUI-Transformers-Pipeline](https://github.com/mediocreatmybest/ComfyUI-Transformers-Pipeline)
-- [Issues & Support](https://github.com/adambarbato/ComfyUI-Sa2VA/issues)
+- [Issues & Support](https://github.com/xzbdqian10nian/Comfyui-Sa2VA-tank/issues)
 - [Troubleshooting Guide](TROUBLESHOOTING.md)
