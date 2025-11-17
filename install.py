@@ -194,9 +194,12 @@ def setup_comfyui_integration():
     # Check if we're in the right directory structure
     current_dir = Path.cwd()
 
-    if current_dir.name.lower() != "comfyui-sa2va":
+    # Accept both original and fork directory names
+    valid_names = ["comfyui-sa2va", "comfyui-sa2va-tank", "comfyui-sa2va-main"]
+    if current_dir.name.lower() not in valid_names:
         print("⚠️  Not in ComfyUI-Sa2VA directory")
         print(f"   Current directory: {current_dir}")
+        print(f"   Expected one of: {', '.join(valid_names)}")
         return False
 
     # Check for ComfyUI directory structure
