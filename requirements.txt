@@ -1,0 +1,8 @@
+torch>=2.0.0
+transformers>=4.57.0
+accelerate
+pillow
+numpy
+qwen_vl_utils
+bitsandbytes
+huggingface_hub

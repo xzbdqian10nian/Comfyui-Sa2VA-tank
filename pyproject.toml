@@ -1,0 +1,18 @@
+[project]
+name = "comfyui-sa2va"
+description = "ComfyUI nodes for Sa2VA (Segment Anything 2 Video Assistant) - Advanced multimodal image and video understanding with segmentation."
+version = "0.0.3"
+license = {file = "LICENSE"}
+dependencies = ["torch", "transformers>=4.57.0", "accelerate", "pillow", "numpy", "huggingface_hub", "qwen_vl_utils"]
+
+[project.urls]
+Repository = "https://github.com/adambarbato/ComfyUI-Sa2VA"
+
+[project.optional-dependencies]
+quantization = ["bitsandbytes"]
+flash_attn = ["flash-attn"]
+
+[tool.comfy]
+PublisherId = "adambarbato"
+DisplayName = "Sa2VA Segmentation"
+Icon = ""
