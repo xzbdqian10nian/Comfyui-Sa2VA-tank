@@ -154,7 +154,7 @@ A single, comprehensive node that provides:
 ## Model Location (Issue #1)
 
 Models are automatically downloaded when first used. The default storage location is:
-- **ComfyUI Models Directory:** `ComfyUI/models/sa2va/模型名/` (recommended)
+- **ComfyUI Models Directory:** `ComfyUI/models/sa2va/<model_name>/` (recommended)
 - **Fallback:** `ComfyUI-Sa2VA/.cache/huggingface/hub/` (if ComfyUI structure not detected)
 
 **Important:** Models are stored with **clear folder structure** (not blob cache), making them easy to find and manage:
@@ -178,10 +178,10 @@ ComfyUI/
 To check model location:
 1. Look in the console output when loading a model - it shows the directory
 2. Each model is typically 4-20GB in size
-3. Models are located at: `ComfyUI/models/sa2va/模型名/`
+3. Models are located at: `ComfyUI/models/sa2va/<model_name>/`
 
 **Manual Model Installation:**
-You can manually download models from HuggingFace and place them in `ComfyUI/models/sa2va/模型名/` folder. The node will automatically detect and use them.
+You can manually download models from HuggingFace and place them in `ComfyUI/models/sa2va/<model_name>/` folder. The node will automatically detect and use them.
 
 ## Model Loader & Multi-Threading
 
