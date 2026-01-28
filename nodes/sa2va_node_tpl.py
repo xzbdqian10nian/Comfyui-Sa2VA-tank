@@ -2,14 +2,83 @@
 # Supports both text generation and segmentation mask output
 # Based on ByteDance/Sa2VA models that combine SAM2 with LLaVA
 
-import torch
-import numpy as np
-import os
 import gc
+import os
+import threading
+import time
 from contextlib import nullcontext
+from typing import Any, Dict, Optional
+
+import numpy as np
+import torch
 from PIL import Image
 import torch.nn.functional as F
 from ..config import be_quiet  # Import global config
+
+# -----------------------------------------------------------------------------
+# Global in-process cache (persists across ComfyUI executions as long as the
+# Python process stays alive). This fixes cases where ComfyUI recreates node
+# instances per prompt execution, which would otherwise defeat instance caching.
+# -----------------------------------------------------------------------------
+_GLOBAL_MODEL_CACHE: Dict[str, Any] = {
+    "model": None,
+    "processor": None,
+    "model_name": None,
+    "use_8bit_quantization": None,
+    "use_flash_attn": None,
+    "dtype": None,  # stores the *requested* dtype string, e.g. "auto"/"float16"
+    "resolved_dtype": None,  # stores the resolved torch dtype, e.g. torch.float16
+    "device": None,
+    "cache_dir": None,
+}
+_GLOBAL_MODEL_CACHE_LOCK = threading.RLock()
+
+# A persistent lock used to ensure only one execution loads/initializes the model at a time.
+# This prevents concurrent executions (or rapid re-entrancy) from forcing reloads.
+_MODEL_LOAD_LOCK = threading.RLock()
+
+
+def _global_cache_is_active() -> bool:
+    """Return True if we currently hold a globally cached model+processor."""
+    with _GLOBAL_MODEL_CACHE_LOCK:
+        return (
+            _GLOBAL_MODEL_CACHE.get("model") is not None
+            and _GLOBAL_MODEL_CACHE.get("processor") is not None
+        )
+
+
+def _clear_global_cache() -> None:
+    """Clear global cache references so future runs will reload cleanly."""
+    with _GLOBAL_MODEL_CACHE_LOCK:
+        _GLOBAL_MODEL_CACHE["model"] = None
+        _GLOBAL_MODEL_CACHE["processor"] = None
+        _GLOBAL_MODEL_CACHE["model_name"] = None
+        _GLOBAL_MODEL_CACHE["use_8bit_quantization"] = None
+        _GLOBAL_MODEL_CACHE["use_flash_attn"] = None
+        _GLOBAL_MODEL_CACHE["dtype"] = None
+        _GLOBAL_MODEL_CACHE["resolved_dtype"] = None
+        _GLOBAL_MODEL_CACHE["device"] = None
+        _GLOBAL_MODEL_CACHE["cache_dir"] = None
+
+
+def _cache_dir_has_model_snapshot(cache_dir: str, model_name: str) -> bool:
+    """
+    Best-effort check for an existing local snapshot of the HF repo in the given cache dir.
+    This avoids running repo_info/snapshot_download (and associated printing) on every load.
+    """
+    try:
+        if not cache_dir:
+            return False
+        # HuggingFace cache layout: <cache_dir>/models--org--repo/
+        # model_name is "Org/Repo"
+        parts = model_name.split("/", 1)
+        if len(parts) != 2:
+            return False
+        org, repo = parts
+        repo_dir = os.path.join(cache_dir, f"models--{org}--{repo}")
+        return os.path.isdir(repo_dir)
+    except Exception:
+        return False
 
 
 def _apply_black_white_points(mask_np, black_point, white_point):
@@ -51,9 +120,13 @@ def _apply_detail_method(mask_np, method):
 
 class Sa2VANodeTpl:
     def __init__(self):
+        # NOTE: ComfyUI may recreate node class instances between runs.
+        # We still keep instance fields, but the real persistence is handled by
+        # the module-level _GLOBAL_MODEL_CACHE.
         self.model = None
         self.processor = None
         self.current_model_name = None  # Track the currently loaded model
+        self._download_cancelled = False
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -193,12 +266,116 @@ class Sa2VANodeTpl:
         cache_dir="",
         use_8bit_quantization=False,
     ):
-        """Loads the specified Sa2VA model only once and caches it."""
-        if (
-            self.model is None
-            or self.processor is None
-            or self.current_model_name != model_name
-        ):
+        """Loads the specified Sa2VA model only once and caches it.
+
+        Important: ComfyUI may recreate node instances between executions.
+        Instance attributes alone may not persist, so we also use a module-level
+        in-process cache (_GLOBAL_MODEL_CACHE) to reuse a single loaded model.
+        """
+        # Fast path: try global cache first.
+        # IMPORTANT: Compare against the *resolved* torch dtype, not just the requested string,
+        # because "auto" depends on device/capabilities.
+        resolved_dtype_for_compare = None
+        if dtype == "auto":
+            if torch.cuda.is_available():
+                if (
+                    hasattr(torch.cuda, "is_bf16_supported")
+                    and torch.cuda.is_bf16_supported()
+                ):
+                    resolved_dtype_for_compare = torch.bfloat16
+                else:
+                    resolved_dtype_for_compare = torch.float16
+            else:
+                resolved_dtype_for_compare = torch.float32
+        else:
+            dtype_map = {
+                "float32": torch.float32,
+                "float16": torch.float16,
+                "bfloat16": torch.bfloat16,
+            }
+            resolved_dtype_for_compare = dtype_map.get(str(dtype), torch.float32)
+
+        with _GLOBAL_MODEL_CACHE_LOCK:
+            if (
+                _GLOBAL_MODEL_CACHE["model"] is not None
+                and _GLOBAL_MODEL_CACHE["processor"] is not None
+                and _GLOBAL_MODEL_CACHE["model_name"] == model_name
+                and _GLOBAL_MODEL_CACHE["use_8bit_quantization"]
+                == use_8bit_quantization
+                and _GLOBAL_MODEL_CACHE["use_flash_attn"] == use_flash_attn
+                and _GLOBAL_MODEL_CACHE["resolved_dtype"] == resolved_dtype_for_compare
+            ):
+                self.model = _GLOBAL_MODEL_CACHE["model"]
+                self.processor = _GLOBAL_MODEL_CACHE["processor"]
+                self.current_model_name = _GLOBAL_MODEL_CACHE["model_name"]
+
+                # Guardrail: ensure the cached object is actually live and on the expected device.
+                # If it was offloaded/unloaded by ComfyUI or other nodes, we should force a reload.
+                try:
+                    _param = next(self.model.parameters())
+                    _cached_device = _param.device
+                    _expected_device = (
+                        torch.device("cuda:0")
+                        if torch.cuda.is_available()
+                        else torch.device("cpu")
+                    )
+
+                    # IMPORTANT:
+                    # Comparing `torch.device("cuda")` vs `torch.device("cuda:0")` can yield
+                    # false mismatches depending on how the backend formats device objects.
+                    # Normalize to just the device "type" (cuda/cpu) for cache validation.
+                    if _cached_device.type != _expected_device.type:
+                        if not be_quiet:
+                            print(
+                                f"⚠️ Cached model device mismatch ({_cached_device} != {_expected_device}); reloading model..."
+                            )
+                        # Drop refs and fall through to cold load
+                        self.model = None
+                        self.processor = None
+                        self.current_model_name = None
+                    else:
+                        if not be_quiet:
+                            print(
+                                f"✅ Reusing cached Sa2VA model: {model_name} (dtype={_GLOBAL_MODEL_CACHE['resolved_dtype']}, 8bit={use_8bit_quantization}, flash_attn={use_flash_attn})"
+                            )
+                        return True
+                except Exception as _e:
+                    if not be_quiet:
+                        print(
+                            f"⚠️ Cached model validation failed; reloading model... ({_e})"
+                        )
+                    self.model = None
+                    self.processor = None
+                    self.current_model_name = None
+
+        # Serialize model initialization to prevent concurrent reloads.
+        with _MODEL_LOAD_LOCK:
+            # Another execution may have loaded it while we were waiting: re-check global cache.
+            with _GLOBAL_MODEL_CACHE_LOCK:
+                if (
+                    _GLOBAL_MODEL_CACHE["model"] is not None
+                    and _GLOBAL_MODEL_CACHE["processor"] is not None
+                    and _GLOBAL_MODEL_CACHE["model_name"] == model_name
+                    and _GLOBAL_MODEL_CACHE["use_8bit_quantization"]
+                    == use_8bit_quantization
+                    and _GLOBAL_MODEL_CACHE["use_flash_attn"] == use_flash_attn
+                    and _GLOBAL_MODEL_CACHE["resolved_dtype"]
+                    == resolved_dtype_for_compare
+                ):
+                    self.model = _GLOBAL_MODEL_CACHE["model"]
+                    self.processor = _GLOBAL_MODEL_CACHE["processor"]
+                    self.current_model_name = _GLOBAL_MODEL_CACHE["model_name"]
+                    if not be_quiet:
+                        print(
+                            f"✅ Reusing cached Sa2VA model: {model_name} (dtype={_GLOBAL_MODEL_CACHE['resolved_dtype']}, 8bit={use_8bit_quantization}, flash_attn={use_flash_attn})"
+                        )
+                    return True
+
+            if (
+                self.model is None
+                or self.processor is None
+                or self.current_model_name != model_name
+            ):
             # Clean up any existing model state first
             if self.model is not None:
                 try:
@@ -407,54 +584,64 @@ class Sa2VANodeTpl:
                         except:
                             return False
 
-                # Enhanced download with cancellable snapshot_download and repo size summary
+                # Enhanced download with cancellable snapshot_download and repo size summary.
+                # IMPORTANT: if the model already exists in the local cache, skip repo_info
+                # printing and skip snapshot_download to avoid overhead every time.
                 try:
                     from huggingface_hub import HfApi, snapshot_download
                     from huggingface_hub.utils import tqdm as hub_tqdm
 
-                    # Print repo size summary to set expectations
-                    try:
-                        api = HfApi()
-                        info = api.repo_info(
-                            model_name, repo_type="model", files_metadata=True
-                        )
-                        sizes = []
-                        file_entries = []
-                        for s in getattr(info, "siblings", []):
-                            sz = getattr(s, "size", None)
-                            if sz is None:
-                                lfs = getattr(s, "lfs", None)
-                                sz = (
-                                    getattr(lfs, "size", None)
-                                    if lfs is not None
-                                    else None
-                                )
-                            if isinstance(sz, int) and sz > 0:
-                                sizes.append(sz)
-                                file_entries.append(
-                                    (
-                                        getattr(
-                                            s, "rfilename", getattr(s, "path", "file")
-                                        ),
-                                        sz,
-                                    )
-                                )
-                        total_bytes = sum(sizes)
-                        if total_bytes > 0:
-                            gb = total_bytes / (1024**3)
-                            print(
-                                f"   Estimated total download size: {gb:.2f} GB across {len(sizes)} files"
+                    cache_already_has_repo = (
+                        _cache_dir_has_model_snapshot(effective_cache_dir, model_name)
+                        if effective_cache_dir
+                        else False
+                    )
+
+                    # Only print repo size summary / run snapshot_download when we likely need to download.
+                    if not cache_already_has_repo:
+                        # Print repo size summary to set expectations
+                        try:
+                            api = HfApi()
+                            info = api.repo_info(
+                                model_name, repo_type="model", files_metadata=True
                             )
-                            largest = sorted(
-                                file_entries, key=lambda x: x[1], reverse=True
-                            )[:5]
-                            if largest:
-                                print("   Largest files:")
-                                for name, sz in largest:
-                                    print(f"     • {name}: {sz / (1024**2):.1f} MB")
-                    except Exception as e:
-                        if not be_quiet:
-                            print(f"   Could not determine repo size: {e}")
+                            sizes = []
+                            file_entries = []
+                            for s in getattr(info, "siblings", []):
+                                sz = getattr(s, "size", None)
+                                if sz is None:
+                                    lfs = getattr(s, "lfs", None)
+                                    sz = (
+                                        getattr(lfs, "size", None)
+                                        if lfs is not None
+                                        else None
+                                    )
+                                if isinstance(sz, int) and sz > 0:
+                                    sizes.append(sz)
+                                    file_entries.append(
+                                        (
+                                            getattr(
+                                                s, "rfilename", getattr(s, "path", "file")
+                                            ),
+                                            sz,
+                                        )
+                                    )
+                            total_bytes = sum(sizes)
+                            if total_bytes > 0:
+                                gb = total_bytes / (1024**3)
+                                print(
+                                    f"   Estimated total download size: {gb:.2f} GB across {len(sizes)} files"
+                                )
+                                largest = sorted(
+                                    file_entries, key=lambda x: x[1], reverse=True
+                                )[:5]
+                                if largest:
+                                    print("   Largest files:")
+                                    for name, sz in largest:
+                                        print(f"     • {name}: {sz / (1024**2):.1f} MB")
+                        except Exception as e:
+                            if not be_quiet:
+                                print(f"   Could not determine repo size: {e}")
 
                     class CancellableTqdm(hub_tqdm):
                         def update(self, n=1):
@@ -462,36 +649,51 @@ class Sa2VANodeTpl:
                                 raise KeyboardInterrupt("Download cancelled by user")
                             return super().update(n)
 
-                    # Use local_dir for clear directory structure, or cache_dir as fallback
-                    if effective_local_dir:
-                        # Direct download to clear directory structure
-                        local_dir = snapshot_download(
-                            repo_id=model_name,
-                            local_dir=effective_local_dir,
-                            resume_download=True,
-                            local_files_only=False,
-                            tqdm_class=CancellableTqdm,
-                        )
-                        if not be_quiet:
-                            print(f"   ✅ Model downloaded to: {local_dir}")
-                    else:
-                        # Fallback to cache_dir (blob storage)
-                        local_dir = snapshot_download(
-                            repo_id=model_name,
-                            cache_dir=effective_cache_dir if effective_cache_dir else None,
-                            resume_download=True,
-                            local_files_only=False,
-                            tqdm_class=CancellableTqdm,
-                        )
+                    # Define local_dir up-front so later references are always valid
+                    local_dir = None
+
+                    if not cache_already_has_repo:
+                        # Use local_dir for clear directory structure, or cache_dir as fallback
+                        if effective_local_dir:
+                            # Direct download to clear directory structure
+                            local_dir = snapshot_download(
+                                repo_id=model_name,
+                                local_dir=effective_local_dir,
+                                resume_download=True,
+                                local_files_only=False,
+                                tqdm_class=CancellableTqdm,
+                            )
+                            if not be_quiet:
+                                print(f"   ✅ Model downloaded to: {local_dir}")
+                        else:
+                            # Fallback to cache_dir (blob storage)
+                            local_dir = snapshot_download(
+                                repo_id=model_name,
+                                cache_dir=effective_cache_dir if effective_cache_dir else None,
+                                resume_download=True,
+                                local_files_only=False,
+                                tqdm_class=CancellableTqdm,
+                            )
 
                     # Load the model from the local directory to avoid extra network calls
                     model_kwargs_local = dict(model_kwargs)
                     model_kwargs_local["local_files_only"] = True
                     model_kwargs_local.pop("cache_dir", None)
-                    self.model = AutoModel.from_pretrained(
-                        local_dir, **model_kwargs_local
-                    ).eval()
-                    print("✅ Model files downloaded and loaded from cache")
+                    
+                    if local_dir:
+                        self.model = AutoModel.from_pretrained(
+                            local_dir, **model_kwargs_local
+                        ).eval()
+                        if not cache_already_has_repo:
+                            print("✅ Model files downloaded and loaded from cache")
+                        else:
+                            if not be_quiet:
+                                print("✅ Model loaded from cache")
+                    else:
+                        # Model appears to already exist in cache; just load normally (local files).
+                        self.model = AutoModel.from_pretrained(
+                            model_name, **model_kwargs_local
+                        ).eval()
 
                 except KeyboardInterrupt:
                     print("\n⚠️ Model download was cancelled")
@@ -559,6 +761,18 @@ class Sa2VANodeTpl:
                 )
 
                 self.current_model_name = model_name
+
+                # Store in global cache for reuse across node instances
+                with _GLOBAL_MODEL_CACHE_LOCK:
+                    _GLOBAL_MODEL_CACHE["model"] = self.model
+                    _GLOBAL_MODEL_CACHE["processor"] = self.processor
+                    _GLOBAL_MODEL_CACHE["model_name"] = model_name
+                    _GLOBAL_MODEL_CACHE["use_8bit_quantization"] = use_8bit_quantization
+                    _GLOBAL_MODEL_CACHE["use_flash_attn"] = use_flash_attn
+                    _GLOBAL_MODEL_CACHE["dtype"] = dtype  # requested dtype string
+                    _GLOBAL_MODEL_CACHE["resolved_dtype"] = resolved_dtype
+                    _GLOBAL_MODEL_CACHE["device"] = target_device
+                    _GLOBAL_MODEL_CACHE["cache_dir"] = effective_cache_dir
 
                 if not be_quiet:
                     print(f"✅ Sa2VA Model Successfully Loaded: {model_name}")
