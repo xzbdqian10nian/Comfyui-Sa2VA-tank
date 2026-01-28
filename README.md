@@ -58,6 +58,29 @@ cd Comfyui-Sa2VA-tank
 pip install -r requirements.txt
 ```
 
+### Updating the Node
+
+To update to the latest version:
+
+```bash
+cd ComfyUI/custom_nodes/Comfyui-Sa2VA-tank
+git pull
+```
+
+**Note:** If you encounter "divergent branches" errors when updating, this is a Git configuration issue, not a problem with the node. The installation script automatically configures Git to prevent this. If you see this error:
+
+```bash
+# Configure Git to use rebase (recommended)
+git config pull.rebase true
+git pull
+
+# Or use merge strategy
+git config pull.rebase false
+git pull
+```
+
+The installation script (`python install.py`) automatically sets this configuration for you.
+
 ### Requirements
 - Python 3.8+
 - PyTorch 2.0+

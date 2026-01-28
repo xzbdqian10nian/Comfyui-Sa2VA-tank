@@ -187,6 +187,47 @@ def test_transformers_compatibility():
         return False
 
 
+def setup_git_config():
+    """Configure Git to prevent pull conflicts."""
+    print("\n⚙️  Configuring Git for smooth updates...")
+    
+    try:
+        # Check if git is available
+        result = subprocess.run(
+            ["git", "--version"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        if result.returncode != 0:
+            print("⚠️  Git not found, skipping Git configuration")
+            return True
+        
+        # Set pull.rebase to true for this repository
+        # This prevents "divergent branches" errors when updating
+        repo_config_cmd = ["git", "config", "pull.rebase", "true"]
+        result = subprocess.run(
+            repo_config_cmd,
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        
+        if result.returncode == 0:
+            print("✅ Git pull strategy configured (rebase)")
+            print("   This prevents update conflicts when pulling new changes")
+        else:
+            # Not a git repository, that's okay
+            print("ℹ️  Not a git repository (normal for manual installs)")
+        
+        return True
+        
+    except Exception as e:
+        print(f"⚠️  Could not configure Git: {e}")
+        print("   This is not critical - updates will still work")
+        return True
+
+
 def setup_comfyui_integration():
     """Set up ComfyUI integration."""
     print("\n🔗 Setting up ComfyUI integration...")
@@ -316,13 +357,16 @@ def main():
         print("   pip install transformers>=4.57.0 --upgrade")
         sys.exit(1)
 
-    # Step 6: Setup ComfyUI integration
+    # Step 6: Setup Git configuration (prevents update conflicts)
+    setup_git_config()
+
+    # Step 7: Setup ComfyUI integration
     if not setup_comfyui_integration():
         print("\n💡 Make sure you're running this from:")
         print("   ComfyUI/custom_nodes/ComfyUI-Sa2VA/")
         sys.exit(1)
 
-    # Step 7: Run basic functionality test (non-critical)
+    # Step 8: Run basic functionality test (non-critical)
     run_basic_test()
 
     # Step 8: Print success information

@@ -1,0 +1,29 @@
+# Git attributes for consistent behavior across platforms
+* text=auto eol=lf
+
+# Ensure shell scripts use LF
+*.sh text eol=lf
+
+# Python files
+*.py text eol=lf
+
+# Markdown files
+*.md text eol=lf
+
+# JSON files
+*.json text eol=lf
+
+# YAML files
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.pth binary
+*.bin binary
+*.safetensors binary
