@@ -60,14 +60,26 @@ pip install -r requirements.txt
 
 ### Updating the Node
 
-To update to the latest version:
+**Recommended:** Use the update script (automatically handles Git configuration):
 
+```bash
+cd ComfyUI/custom_nodes/Comfyui-Sa2VA-tank
+python update.py
+```
+
+Or on Linux/Mac:
+```bash
+cd ComfyUI/custom_nodes/Comfyui-Sa2VA-tank
+bash update.sh
+```
+
+**Manual Update:**
 ```bash
 cd ComfyUI/custom_nodes/Comfyui-Sa2VA-tank
 git pull
 ```
 
-**Note:** If you encounter "divergent branches" errors when updating, this is a Git configuration issue, not a problem with the node. The installation script automatically configures Git to prevent this. If you see this error:
+**Note:** If you encounter "divergent branches" errors when updating, this is a Git configuration issue, not a problem with the node. The update script automatically configures Git to prevent this. If updating manually and you see this error:
 
 ```bash
 # Configure Git to use rebase (recommended)
@@ -79,7 +91,7 @@ git config pull.rebase false
 git pull
 ```
 
-The installation script (`python install.py`) automatically sets this configuration for you.
+The installation script (`python install.py`) and update script (`python update.py`) automatically set this configuration for you.
 
 ### Requirements
 - Python 3.8+
