@@ -376,443 +376,441 @@ class Sa2VANodeTpl:
                 or self.processor is None
                 or self.current_model_name != model_name
             ):
-            # Clean up any existing model state first
-            if self.model is not None:
-                try:
-                    del self.model
-                    self.model = None
-                except:
-                    pass
-            if self.processor is not None:
-                try:
-                    del self.processor
-                    self.processor = None
-                except:
-                    pass
-            self.current_model_name = None
-
-            # Clear CUDA cache before loading new model
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                if hasattr(torch.cuda, "ipc_collect"):
-                    torch.cuda.ipc_collect()
-            if not be_quiet:
-                print(f"🔄 Loading Sa2VA Model: {model_name}")
-
-            # Check transformers version
-            version_ok, version_info = self.check_transformers_version()
-            if not version_ok:
-                print(f"❌ {version_info}")
-                print("💡 Attempting automatic upgrade...")
-
-                if self.install_transformers_upgrade():
-                    print("⚠️  Restart ComfyUI required for the upgrade to take effect")
-                    return False
-                else:
-                    print(
-                        "💡 Manual upgrade required: pip install transformers>=4.57.0 --upgrade"
-                    )
-                    return False
-
-            # Determine model storage directory - use ComfyUI's models directory with clear structure
-            effective_cache_dir = None
-            effective_local_dir = None  # Use local_dir for clear file structure
-            if cache_dir and cache_dir.strip():
-                effective_cache_dir = cache_dir.strip()
-                if not be_quiet:
-                    print(f"   Using custom cache directory: {effective_cache_dir}")
-            else:
-                # Use ComfyUI's models directory structure with clear folder names
-                import os
-
-                # Get the directory of this file (Sa2VA nodes folder)
-                current_dir = os.path.dirname(
-                    os.path.dirname(os.path.abspath(__file__))
-                )
-                
-                # Find ComfyUI root directory (parent of custom_nodes)
-                # Structure: ComfyUI/custom_nodes/ComfyUI-Sa2VA/
-                comfyui_root = os.path.dirname(os.path.dirname(current_dir))
-                
-                # Check if we're in the expected structure
-                if os.path.basename(os.path.dirname(current_dir)) == "custom_nodes":
-                    # Use ComfyUI/models/sa2va/ for model storage
-                    models_dir = os.path.join(comfyui_root, "models", "sa2va")
-                    
-                    # Create model-specific directory with clear name
-                    # Convert model name like "ByteDance/Sa2VA-Qwen3-VL-4B" to "Sa2VA-Qwen3-VL-4B"
-                    model_folder_name = model_name.split("/")[-1] if "/" in model_name else model_name
-                    model_local_dir = os.path.join(models_dir, model_folder_name)
-                    
-                    # Create the directory if it doesn't exist
-                    os.makedirs(model_local_dir, exist_ok=True)
-                    
-                    # Use local_dir for direct download (not blob cache)
-                    effective_local_dir = model_local_dir
-                    
-                    if not be_quiet:
-                        print(f"   Using ComfyUI models directory: {model_local_dir}")
-                        print(f"   Models will be stored with clear folder structure (not blob cache)")
-                else:
-                    # Fallback: use local cache if structure is unexpected
-                    effective_cache_dir = os.path.join(
-                        current_dir, ".cache", "huggingface", "hub"
-                    )
-                    os.makedirs(effective_cache_dir, exist_ok=True)
-                    
-                    if not be_quiet:
-                        print(f"   ⚠️ Unexpected directory structure, using local cache: {effective_cache_dir}")
-                        print(f"   Expected: ComfyUI/custom_nodes/ComfyUI-Sa2VA/")
-
-            # Handle dtype conversion with proper warnings
-            # Resolve target dtype robustly to reduce memory while maintaining compatibility
-            auto_selected = False
-            if dtype == "auto":
-                auto_selected = True
-                if torch.cuda.is_available():
-                    # Prefer bf16 if supported, else fp16; on CPU stick to fp32
-                    if (
-                        hasattr(torch.cuda, "is_bf16_supported")
-                        and torch.cuda.is_bf16_supported()
-                    ):
-                        resolved_dtype = torch.bfloat16
-                    else:
-                        resolved_dtype = torch.float16
-                else:
-                    resolved_dtype = torch.float32
-                if not be_quiet:
-                    print(
-                        f"   Auto-selected dtype: {resolved_dtype} (based on device capabilities)"
-                    )
-            else:
-                # Map explicit dtype request
-                dtype_map = {
-                    "float32": torch.float32,
-                    "float16": torch.float16,
-                    "bfloat16": torch.bfloat16,
-                }
-                resolved_dtype = dtype_map.get(str(dtype), torch.float32)
-                if not be_quiet:
-                    print(f"   Target dtype for model: {resolved_dtype}")
-
-            try:
-                # Import here to catch missing dependencies
-                from transformers import AutoProcessor, AutoModel
-
-                # Build model loading arguments
-                model_kwargs = {
-                    "low_cpu_mem_usage": True,
-                    "trust_remote_code": True,
-                }
-
-                # Add cache directory if specified
-                if effective_cache_dir:
-                    model_kwargs["cache_dir"] = effective_cache_dir
-
-                # Add 8-bit quantization if requested
-                if use_8bit_quantization:
+                # Clean up any existing model state first
+                if self.model is not None:
                     try:
-                        import bitsandbytes as bnb
-                        from transformers import BitsAndBytesConfig
-
-                        # Enhanced 8-bit quantization config for better compatibility
-                        quantization_config = BitsAndBytesConfig(
-                            load_in_8bit=True,
-                            llm_int8_enable_fp32_cpu_offload=True,
-                            llm_int8_threshold=6.0,  # Threshold for outlier detection
-                        )
-                        model_kwargs["quantization_config"] = quantization_config
-                        # Don't set torch_dtype when using 8-bit quantization
-                        model_kwargs.pop("torch_dtype", None)
-                        if not be_quiet:
-                            print("   Using 8-bit quantization with bitsandbytes")
-                            print("   Note: torch_dtype will be ignored with 8-bit quantization")
-                    except ImportError:
-                        if not be_quiet:
-                            print(
-                                "   Warning: bitsandbytes not available, skipping 8-bit quantization"
-                            )
-                            print("   Install with: pip install bitsandbytes")
-
-                # Add flash attention if available and requested
-                if use_flash_attn:
-                    try:
-                        import flash_attn
-
-                        model_kwargs["use_flash_attn"] = True
-                        if not be_quiet:
-                            print("   Using Flash Attention")
-                    except ImportError:
-                        if not be_quiet:
-                            print(
-                                "   Flash Attention not available, continuing without it"
-                            )
-                            print("   Install with: pip install flash-attn")
-                        # Don't add flash_attn to model_kwargs if not available
-                else:
-                    if not be_quiet:
-                        print("   Flash Attention disabled by user")
-
-                # Use resolved dtype for load to reduce memory (skip if using quantization)
-                # Note: 8-bit quantization handles dtype internally, don't override
-                if resolved_dtype is not None and not use_8bit_quantization:
-                    model_kwargs["torch_dtype"] = resolved_dtype
-                elif use_8bit_quantization:
-                    # Ensure torch_dtype is not set when using 8-bit quantization
-                    model_kwargs.pop("torch_dtype", None)
-
-                # Load model with enhanced progress and cancellation support
-                print("🔄 Starting model download/load...")
-                print("   Note: Large models may take several minutes to download")
-
-                # Check if ComfyUI cancellation is available
-                def is_cancelled():
-                    try:
-                        # Try to access ComfyUI's execution state
-                        import execution
-
-                        return (
-                            execution.current_task is not None
-                            and execution.current_task.cancelled
-                        )
+                        del self.model
+                        self.model = None
                     except:
-                        try:
-                            # Alternative ComfyUI cancellation check
-                            import model_management
-
-                            return model_management.processing_interrupted()
-                        except:
-                            return False
-
-                # Enhanced download with cancellable snapshot_download and repo size summary.
-                # IMPORTANT: if the model already exists in the local cache, skip repo_info
-                # printing and skip snapshot_download to avoid overhead every time.
-                try:
-                    from huggingface_hub import HfApi, snapshot_download
-                    from huggingface_hub.utils import tqdm as hub_tqdm
-
-                    cache_already_has_repo = (
-                        _cache_dir_has_model_snapshot(effective_cache_dir, model_name)
-                        if effective_cache_dir
-                        else False
-                    )
-
-                    # Only print repo size summary / run snapshot_download when we likely need to download.
-                    if not cache_already_has_repo:
-                        # Print repo size summary to set expectations
-                        try:
-                            api = HfApi()
-                            info = api.repo_info(
-                                model_name, repo_type="model", files_metadata=True
-                            )
-                            sizes = []
-                            file_entries = []
-                            for s in getattr(info, "siblings", []):
-                                sz = getattr(s, "size", None)
-                                if sz is None:
-                                    lfs = getattr(s, "lfs", None)
-                                    sz = (
-                                        getattr(lfs, "size", None)
-                                        if lfs is not None
-                                        else None
-                                    )
-                                if isinstance(sz, int) and sz > 0:
-                                    sizes.append(sz)
-                                    file_entries.append(
-                                        (
-                                            getattr(
-                                                s, "rfilename", getattr(s, "path", "file")
-                                            ),
-                                            sz,
-                                        )
-                                    )
-                            total_bytes = sum(sizes)
-                            if total_bytes > 0:
-                                gb = total_bytes / (1024**3)
-                                print(
-                                    f"   Estimated total download size: {gb:.2f} GB across {len(sizes)} files"
-                                )
-                                largest = sorted(
-                                    file_entries, key=lambda x: x[1], reverse=True
-                                )[:5]
-                                if largest:
-                                    print("   Largest files:")
-                                    for name, sz in largest:
-                                        print(f"     • {name}: {sz / (1024**2):.1f} MB")
-                        except Exception as e:
-                            if not be_quiet:
-                                print(f"   Could not determine repo size: {e}")
-
-                    class CancellableTqdm(hub_tqdm):
-                        def update(self, n=1):
-                            if is_cancelled():
-                                raise KeyboardInterrupt("Download cancelled by user")
-                            return super().update(n)
-
-                    # Define local_dir up-front so later references are always valid
-                    local_dir = None
-
-                    if not cache_already_has_repo:
-                        # Use local_dir for clear directory structure, or cache_dir as fallback
-                        if effective_local_dir:
-                            # Direct download to clear directory structure
-                            local_dir = snapshot_download(
-                                repo_id=model_name,
-                                local_dir=effective_local_dir,
-                                resume_download=True,
-                                local_files_only=False,
-                                tqdm_class=CancellableTqdm,
-                            )
-                            if not be_quiet:
-                                print(f"   ✅ Model downloaded to: {local_dir}")
-                        else:
-                            # Fallback to cache_dir (blob storage)
-                            local_dir = snapshot_download(
-                                repo_id=model_name,
-                                cache_dir=effective_cache_dir if effective_cache_dir else None,
-                                resume_download=True,
-                                local_files_only=False,
-                                tqdm_class=CancellableTqdm,
-                            )
-
-                    # Load the model from the local directory to avoid extra network calls
-                    model_kwargs_local = dict(model_kwargs)
-                    model_kwargs_local["local_files_only"] = True
-                    model_kwargs_local.pop("cache_dir", None)
-                    
-                    if local_dir:
-                        self.model = AutoModel.from_pretrained(
-                            local_dir, **model_kwargs_local
-                        ).eval()
-                        if not cache_already_has_repo:
-                            print("✅ Model files downloaded and loaded from cache")
-                        else:
-                            if not be_quiet:
-                                print("✅ Model loaded from cache")
-                    else:
-                        # Model appears to already exist in cache; just load normally (local files).
-                        self.model = AutoModel.from_pretrained(
-                            model_name, **model_kwargs_local
-                        ).eval()
-
-                except KeyboardInterrupt:
-                    print("\n⚠️ Model download was cancelled")
-                    return False
-                except Exception as e:
-                    if not be_quiet:
-                        print(f"   Enhanced download failed: {e}")
-                        print("   Using standard download...")
-                    self.model = AutoModel.from_pretrained(
-                        model_name, **model_kwargs
-                    ).eval()
-
-                # Place model on the appropriate device and dtype for lower memory
-                target_device = (
-                    torch.device("cuda")
-                    if torch.cuda.is_available()
-                    else torch.device("cpu")
-                )
-
-                # Skip device/dtype conversion if using 8-bit quantization (already handled)
-                if not use_8bit_quantization:
+                        pass
+                if self.processor is not None:
                     try:
-                        # Move to device first, then handle dtype if needed
-                        self.model = self.model.to(device=target_device)
-                        # Only convert dtype if it's different from current and supported
+                        del self.processor
+                        self.processor = None
+                    except:
+                        pass
+                self.current_model_name = None
+
+                # Clear CUDA cache before loading new model
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    if hasattr(torch.cuda, "ipc_collect"):
+                        torch.cuda.ipc_collect()
+                if not be_quiet:
+                    print(f"🔄 Loading Sa2VA Model: {model_name}")
+
+                # Check transformers version
+                version_ok, version_info = self.check_transformers_version()
+                if not version_ok:
+                    print(f"❌ {version_info}")
+                    print("💡 Attempting automatic upgrade...")
+
+                    if self.install_transformers_upgrade():
+                        print("⚠️  Restart ComfyUI required for the upgrade to take effect")
+                        return False
+                    else:
+                        print(
+                            "💡 Manual upgrade required: pip install transformers>=4.57.0 --upgrade"
+                        )
+                        return False
+
+                    # Determine model storage directory - use ComfyUI's models directory with clear structure
+                effective_cache_dir = None
+                effective_local_dir = None  # Use local_dir for clear file structure
+                if cache_dir and cache_dir.strip():
+                    effective_cache_dir = cache_dir.strip()
+                    if not be_quiet:
+                        print(f"   Using custom cache directory: {effective_cache_dir}")
+                else:
+                    # Use ComfyUI's models directory structure with clear folder names
+                    import os
+
+                    # Get the directory of this file (Sa2VA nodes folder)
+                    current_dir = os.path.dirname(
+                        os.path.dirname(os.path.abspath(__file__))
+                    )
+                    
+                    # Find ComfyUI root directory (parent of custom_nodes)
+                    # Structure: ComfyUI/custom_nodes/ComfyUI-Sa2VA/
+                    comfyui_root = os.path.dirname(os.path.dirname(current_dir))
+                    
+                    # Check if we're in the expected structure
+                    if os.path.basename(os.path.dirname(current_dir)) == "custom_nodes":
+                        # Use ComfyUI/models/sa2va/ for model storage
+                        models_dir = os.path.join(comfyui_root, "models", "sa2va")
+                        
+                        # Create model-specific directory with clear name
+                        # Convert model name like "ByteDance/Sa2VA-Qwen3-VL-4B" to "Sa2VA-Qwen3-VL-4B"
+                        model_folder_name = model_name.split("/")[-1] if "/" in model_name else model_name
+                        model_local_dir = os.path.join(models_dir, model_folder_name)
+                        
+                        # Create the directory if it doesn't exist
+                        os.makedirs(model_local_dir, exist_ok=True)
+                        
+                        # Use local_dir for direct download (not blob cache)
+                        effective_local_dir = model_local_dir
+                        
+                        if not be_quiet:
+                            print(f"   Using ComfyUI models directory: {model_local_dir}")
+                            print(f"   Models will be stored with clear folder structure (not blob cache)")
+                    else:
+                        # Fallback: use local cache if structure is unexpected
+                        effective_cache_dir = os.path.join(
+                            current_dir, ".cache", "huggingface", "hub"
+                        )
+                        os.makedirs(effective_cache_dir, exist_ok=True)
+                        
+                        if not be_quiet:
+                            print(f"   ⚠️ Unexpected directory structure, using local cache: {effective_cache_dir}")
+                            print(f"   Expected: ComfyUI/custom_nodes/ComfyUI-Sa2VA/")
+
+                # Handle dtype conversion with proper warnings
+                # Resolve target dtype robustly to reduce memory while maintaining compatibility
+                auto_selected = False
+                if dtype == "auto":
+                    auto_selected = True
+                    if torch.cuda.is_available():
+                        # Prefer bf16 if supported, else fp16; on CPU stick to fp32
                         if (
-                            hasattr(self.model, "dtype")
-                            and self.model.dtype != resolved_dtype
+                            hasattr(torch.cuda, "is_bf16_supported")
+                            and torch.cuda.is_bf16_supported()
                         ):
+                            resolved_dtype = torch.bfloat16
+                        else:
+                            resolved_dtype = torch.float16
+                    else:
+                        resolved_dtype = torch.float32
+                    if not be_quiet:
+                        print(
+                            f"   Auto-selected dtype: {resolved_dtype} (based on device capabilities)"
+                        )
+                else:
+                    # Map explicit dtype request
+                    dtype_map = {
+                        "float32": torch.float32,
+                        "float16": torch.float16,
+                        "bfloat16": torch.bfloat16,
+                    }
+                    resolved_dtype = dtype_map.get(str(dtype), torch.float32)
+                    if not be_quiet:
+                        print(f"   Target dtype for model: {resolved_dtype}")
+
+                try:
+                    # Import here to catch missing dependencies
+                    from transformers import AutoProcessor, AutoModel
+
+                    # Build model loading arguments
+                    model_kwargs = {
+                        "low_cpu_mem_usage": True,
+                        "trust_remote_code": True,
+                    }
+
+                    # Add cache directory if specified
+                    if effective_cache_dir:
+                        model_kwargs["cache_dir"] = effective_cache_dir
+
+                    # Add 8-bit quantization if requested
+                    if use_8bit_quantization:
+                        try:
+                            import bitsandbytes as bnb
+                            from transformers import BitsAndBytesConfig
+
+                            # Enhanced 8-bit quantization config for better compatibility
+                            quantization_config = BitsAndBytesConfig(
+                                load_in_8bit=True,
+                                llm_int8_enable_fp32_cpu_offload=True,
+                                llm_int8_threshold=6.0,  # Threshold for outlier detection
+                            )
+                            model_kwargs["quantization_config"] = quantization_config
+                            # Don't set torch_dtype when using 8-bit quantization
+                            model_kwargs.pop("torch_dtype", None)
+                            if not be_quiet:
+                                print("   Using 8-bit quantization with bitsandbytes")
+                                print("   Note: torch_dtype will be ignored with 8-bit quantization")
+                        except ImportError:
+                            if not be_quiet:
+                                print(
+                                    "   Warning: bitsandbytes not available, skipping 8-bit quantization"
+                                )
+                                print("   Install with: pip install bitsandbytes")
+
+                    # Add flash attention if available and requested
+                    if use_flash_attn:
+                        try:
+                            import flash_attn
+
+                            model_kwargs["use_flash_attn"] = True
+                            if not be_quiet:
+                                print("   Using Flash Attention")
+                        except ImportError:
+                            if not be_quiet:
+                                print(
+                                    "   Flash Attention not available, continuing without it"
+                                )
+                                print("   Install with: pip install flash-attn")
+                            # Don't add flash_attn to model_kwargs if not available
+                    else:
+                        if not be_quiet:
+                            print("   Flash Attention disabled by user")
+
+                    # Use resolved dtype for load to reduce memory (skip if using quantization)
+                    # Note: 8-bit quantization handles dtype internally, don't override
+                    if resolved_dtype is not None and not use_8bit_quantization:
+                        model_kwargs["torch_dtype"] = resolved_dtype
+                    elif use_8bit_quantization:
+                        # Ensure torch_dtype is not set when using 8-bit quantization
+                        model_kwargs.pop("torch_dtype", None)
+
+                    # Load model with enhanced progress and cancellation support
+                    print("🔄 Starting model download/load...")
+                    print("   Note: Large models may take several minutes to download")
+
+                    # Check if ComfyUI cancellation is available
+                    def is_cancelled():
+                        try:
+                            # Try to access ComfyUI's execution state
+                            import execution
+
+                            return (
+                                execution.current_task is not None
+                                and execution.current_task.cancelled
+                            )
+                        except:
                             try:
-                                self.model = self.model.to(dtype=resolved_dtype)
+                                # Alternative ComfyUI cancellation check
+                                import model_management
+
+                                return model_management.processing_interrupted()
+                            except:
+                                return False
+
+                    # Enhanced download with cancellable snapshot_download and repo size summary.
+                    # IMPORTANT: if the model already exists in the local cache, skip repo_info
+                    # printing and skip snapshot_download to avoid overhead every time.
+                    try:
+                        from huggingface_hub import HfApi, snapshot_download
+                        from huggingface_hub.utils import tqdm as hub_tqdm
+
+                        cache_already_has_repo = (
+                            _cache_dir_has_model_snapshot(effective_cache_dir, model_name)
+                            if effective_cache_dir
+                            else False
+                        )
+
+                        # Only print repo size summary / run snapshot_download when we likely need to download.
+                        if not cache_already_has_repo:
+                            # Print repo size summary to set expectations
+                            try:
+                                api = HfApi()
+                                info = api.repo_info(
+                                    model_name, repo_type="model", files_metadata=True
+                                )
+                                sizes = []
+                                file_entries = []
+                                for s in getattr(info, "siblings", []):
+                                    sz = getattr(s, "size", None)
+                                    if sz is None:
+                                        lfs = getattr(s, "lfs", None)
+                                        sz = (
+                                            getattr(lfs, "size", None)
+                                            if lfs is not None
+                                            else None
+                                        )
+                                    if isinstance(sz, int) and sz > 0:
+                                        sizes.append(sz)
+                                        file_entries.append(
+                                            (
+                                                getattr(
+                                                    s, "rfilename", getattr(s, "path", "file")
+                                                ),
+                                                sz,
+                                            )
+                                        )
+                                total_bytes = sum(sizes)
+                                if total_bytes > 0:
+                                    gb = total_bytes / (1024**3)
+                                    print(
+                                        f"   Estimated total download size: {gb:.2f} GB across {len(sizes)} files"
+                                    )
+                                    largest = sorted(
+                                        file_entries, key=lambda x: x[1], reverse=True
+                                    )[:5]
+                                    if largest:
+                                        print("   Largest files:")
+                                        for name, sz in largest:
+                                            print(f"     • {name}: {sz / (1024**2):.1f} MB")
                             except Exception as e:
                                 if not be_quiet:
-                                    print(
-                                        f"   Note: Could not convert to {resolved_dtype}, keeping original dtype: {e}"
-                                    )
+                                    print(f"   Could not determine repo size: {e}")
+
+                            class CancellableTqdm(hub_tqdm):
+                                def update(self, n=1):
+                                    if is_cancelled():
+                                        raise KeyboardInterrupt("Download cancelled by user")
+                                    return super().update(n)
+
+                            # Define local_dir up-front so later references are always valid
+                            local_dir = None
+
+                            if effective_local_dir:
+                                # Direct download to clear directory structure
+                                local_dir = snapshot_download(
+                                    repo_id=model_name,
+                                    local_dir=effective_local_dir,
+                                    resume_download=True,
+                                    local_files_only=False,
+                                    tqdm_class=CancellableTqdm,
+                                )
+                                if not be_quiet:
+                                    print(f"   ✅ Model downloaded to: {local_dir}")
+                            else:
+                                # Fallback to cache_dir (blob storage)
+                                local_dir = snapshot_download(
+                                    repo_id=model_name,
+                                    cache_dir=effective_cache_dir if effective_cache_dir else None,
+                                    resume_download=True,
+                                    local_files_only=False,
+                                    tqdm_class=CancellableTqdm,
+                                )
+
+                            # Load the model from the local directory to avoid extra network calls
+                            model_kwargs_local = dict(model_kwargs)
+                            model_kwargs_local["local_files_only"] = True
+                            model_kwargs_local.pop("cache_dir", None)
+                            
+                            if local_dir:
+                                self.model = AutoModel.from_pretrained(
+                                    local_dir, **model_kwargs_local
+                                ).eval()
+                                if not cache_already_has_repo:
+                                    print("✅ Model files downloaded and loaded from cache")
+                                else:
+                                    if not be_quiet:
+                                        print("✅ Model loaded from cache")
+                            else:
+                                # Model appears to already exist in cache; just load normally (local files).
+                                self.model = AutoModel.from_pretrained(
+                                    model_name, **model_kwargs_local
+                                ).eval()
+
+                    except KeyboardInterrupt:
+                        print("\n⚠️ Model download was cancelled")
+                        return False
                     except Exception as e:
                         if not be_quiet:
-                            print(f"   Warning: Model placement failed: {e}")
-
-                if not be_quiet:
-                    if use_8bit_quantization:
-                        print(
-                            f"   Model loaded with 8-bit quantization on {target_device}"
-                        )
-                    else:
-                        actual_dtype = (
-                            getattr(self.model, "dtype", "unknown")
-                            if hasattr(self.model, "dtype")
-                            else "unknown"
-                        )
-                        print(
-                            f"   Model moved to {target_device} with dtype {actual_dtype}"
-                        )
-
-                # Load processor (from local_dir if available to avoid refetch)
-                processor_kwargs = {"trust_remote_code": True, "use_fast": False}
-                # Don't use cache_dir if we're using local_dir (direct download)
-                if effective_cache_dir and not effective_local_dir:
-                    processor_kwargs["cache_dir"] = effective_cache_dir
-
-                processor_source = local_dir if "local_dir" in locals() else model_name
-                self.processor = AutoProcessor.from_pretrained(
-                    processor_source, **processor_kwargs
-                )
-
-                self.current_model_name = model_name
-
-                # Store in global cache for reuse across node instances
-                with _GLOBAL_MODEL_CACHE_LOCK:
-                    _GLOBAL_MODEL_CACHE["model"] = self.model
-                    _GLOBAL_MODEL_CACHE["processor"] = self.processor
-                    _GLOBAL_MODEL_CACHE["model_name"] = model_name
-                    _GLOBAL_MODEL_CACHE["use_8bit_quantization"] = use_8bit_quantization
-                    _GLOBAL_MODEL_CACHE["use_flash_attn"] = use_flash_attn
-                    _GLOBAL_MODEL_CACHE["dtype"] = dtype  # requested dtype string
-                    _GLOBAL_MODEL_CACHE["resolved_dtype"] = resolved_dtype
-                    _GLOBAL_MODEL_CACHE["device"] = target_device
-                    _GLOBAL_MODEL_CACHE["cache_dir"] = effective_cache_dir
-
-                if not be_quiet:
-                    print(f"✅ Sa2VA Model Successfully Loaded: {model_name}")
-
-            except ImportError as e:
-                error_str = str(e)
-                if "flash_attn" in error_str:
-                    print(f"❌ Flash Attention dependency missing: {e}")
-                    print("💡 Retrying model load without Flash Attention...")
-                    # Remove flash_attn requirement and retry
-                    model_kwargs.pop("use_flash_attn", None)
-                    try:
+                            print(f"   Enhanced download failed: {e}")
+                            print("   Using standard download...")
                         self.model = AutoModel.from_pretrained(
                             model_name, **model_kwargs
                         ).eval()
-                        print("✅ Model loaded successfully without Flash Attention")
-                    except Exception as retry_e:
-                        print(
-                            f"❌ Model loading failed even without Flash Attention: {retry_e}"
-                        )
+
+                    # Place model on the appropriate device and dtype for lower memory
+                    target_device = (
+                        torch.device("cuda")
+                        if torch.cuda.is_available()
+                        else torch.device("cpu")
+                    )
+
+                    # Skip device/dtype conversion if using 8-bit quantization (already handled)
+                    if not use_8bit_quantization:
+                        try:
+                            # Move to device first, then handle dtype if needed
+                            self.model = self.model.to(device=target_device)
+                            # Only convert dtype if it's different from current and supported
+                            if (
+                                hasattr(self.model, "dtype")
+                                and self.model.dtype != resolved_dtype
+                            ):
+                                try:
+                                    self.model = self.model.to(dtype=resolved_dtype)
+                                except Exception as e:
+                                    if not be_quiet:
+                                        print(
+                                            f"   Note: Could not convert to {resolved_dtype}, keeping original dtype: {e}"
+                                        )
+                        except Exception as e:
+                            if not be_quiet:
+                                print(f"   Warning: Model placement failed: {e}")
+
+                    if not be_quiet:
+                        if use_8bit_quantization:
+                            print(
+                                f"   Model loaded with 8-bit quantization on {target_device}"
+                            )
+                        else:
+                            actual_dtype = (
+                                getattr(self.model, "dtype", "unknown")
+                                if hasattr(self.model, "dtype")
+                                else "unknown"
+                            )
+                            print(
+                                f"   Model moved to {target_device} with dtype {actual_dtype}"
+                            )
+
+                    # Load processor (from local_dir if available to avoid refetch)
+                    processor_kwargs = {"trust_remote_code": True, "use_fast": False}
+                    # Don't use cache_dir if we're using local_dir (direct download)
+                    if effective_cache_dir and not effective_local_dir:
+                        processor_kwargs["cache_dir"] = effective_cache_dir
+
+                    processor_source = local_dir if "local_dir" in locals() else model_name
+                    self.processor = AutoProcessor.from_pretrained(
+                        processor_source, **processor_kwargs
+                    )
+
+                    self.current_model_name = model_name
+
+                    # Store in global cache for reuse across node instances
+                    with _GLOBAL_MODEL_CACHE_LOCK:
+                        _GLOBAL_MODEL_CACHE["model"] = self.model
+                        _GLOBAL_MODEL_CACHE["processor"] = self.processor
+                        _GLOBAL_MODEL_CACHE["model_name"] = model_name
+                        _GLOBAL_MODEL_CACHE["use_8bit_quantization"] = use_8bit_quantization
+                        _GLOBAL_MODEL_CACHE["use_flash_attn"] = use_flash_attn
+                        _GLOBAL_MODEL_CACHE["dtype"] = dtype  # requested dtype string
+                        _GLOBAL_MODEL_CACHE["resolved_dtype"] = resolved_dtype
+                        _GLOBAL_MODEL_CACHE["device"] = target_device
+                        _GLOBAL_MODEL_CACHE["cache_dir"] = effective_cache_dir
+
+                    if not be_quiet:
+                        print(f"✅ Sa2VA Model Successfully Loaded: {model_name}")
+
+                except ImportError as e:
+                    error_str = str(e)
+                    if "flash_attn" in error_str:
+                        print(f"❌ Flash Attention dependency missing: {e}")
+                        print("💡 Retrying model load without Flash Attention...")
+                        # Remove flash_attn requirement and retry
+                        model_kwargs.pop("use_flash_attn", None)
+                        try:
+                            self.model = AutoModel.from_pretrained(
+                                model_name, **model_kwargs
+                            ).eval()
+                            print("✅ Model loaded successfully without Flash Attention")
+                        except Exception as retry_e:
+                            print(
+                                f"❌ Model loading failed even without Flash Attention: {retry_e}"
+                            )
+                            return False
+                    else:
+                        print(f"❌ Missing dependencies for Sa2VA model: {e}")
+                        print("💡 Try installing: pip install transformers>=4.57.0")
                         return False
-                else:
-                    print(f"❌ Missing dependencies for Sa2VA model: {e}")
-                    print("💡 Try installing: pip install transformers>=4.57.0")
+                except Exception as e:
+                    print(f"❌ Error loading Sa2VA model {model_name}: {e}")
+                    if "qwen_vl_utils" in str(e).lower():
+                        print("💡 Missing qwen_vl_utils dependency")
+                        print("   Install it with: pip install qwen_vl_utils")
+                    elif "qwen3_vl" in str(e).lower():
+                        print(
+                            "💡 This error suggests your transformers version doesn't support Qwen3-VL"
+                        )
+                        print("   Try upgrading: pip install transformers>=4.57.0")
+                    elif "trust_remote_code" in str(e).lower():
+                        print(
+                            "💡 This model requires trust_remote_code=True (enabled by default)"
+                        )
                     return False
-            except Exception as e:
-                print(f"❌ Error loading Sa2VA model {model_name}: {e}")
-                if "qwen_vl_utils" in str(e).lower():
-                    print("💡 Missing qwen_vl_utils dependency")
-                    print("   Install it with: pip install qwen_vl_utils")
-                elif "qwen3_vl" in str(e).lower():
-                    print(
-                        "💡 This error suggests your transformers version doesn't support Qwen3-VL"
-                    )
-                    print("   Try upgrading: pip install transformers>=4.57.0")
-                elif "trust_remote_code" in str(e).lower():
-                    print(
-                        "💡 This model requires trust_remote_code=True (enabled by default)"
-                    )
-                return False
 
         return True
 
