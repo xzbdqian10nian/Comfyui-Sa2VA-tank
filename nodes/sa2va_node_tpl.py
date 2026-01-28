@@ -414,7 +414,7 @@ class Sa2VANodeTpl:
                         )
                         return False
 
-                    # Determine model storage directory - use ComfyUI's models directory with clear structure
+                # Determine model storage directory - use ComfyUI's models directory with clear structure
                 effective_cache_dir = None
                 effective_local_dir = None  # Use local_dir for clear file structure
                 if cache_dir and cache_dir.strip():
